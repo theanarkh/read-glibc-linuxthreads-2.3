@@ -22,7 +22,7 @@
 #include "restart.h"
 #include "queue.h"
 #include <shlib-compat.h>
-
+// 初始化信号量
 int __new_sem_init(sem_t *sem, int pshared, unsigned int value)
 {
   if (value > SEM_VALUE_MAX) {
@@ -34,14 +34,16 @@ int __new_sem_init(sem_t *sem, int pshared, unsigned int value)
     return -1;
   }
   __pthread_init_lock(&sem->__sem_lock);
+  // 资源数
   sem->__sem_value = value;
+  // 等待资源的线程队列
   sem->__sem_waiting = NULL;
   return 0;
 }
 
 /* Function called by pthread_cancel to remove the thread from
    waiting inside __new_sem_wait. */
-
+// 在pthread_cancel中被执行
 static int new_sem_extricate_func(void *obj, pthread_descr th)
 {
   volatile pthread_descr self = thread_self();
@@ -49,6 +51,7 @@ static int new_sem_extricate_func(void *obj, pthread_descr th)
   int did_remove = 0;
 
   __pthread_lock(&sem->__sem_lock, self);
+  // 把当前线程从等待信号量的队列中移除，返回是否移除成功
   did_remove = remove_from_queue(&sem->__sem_waiting, th);
   __pthread_unlock(&sem->__sem_lock);
 
@@ -67,22 +70,27 @@ int __new_sem_wait(sem_t * sem)
   extr.pu_extricate_func = new_sem_extricate_func;
 
   __pthread_lock(&sem->__sem_lock, self);
+  // 还有可用的资源
   if (sem->__sem_value > 0) {
     sem->__sem_value--;
     __pthread_unlock(&sem->__sem_lock);
     return 0;
   }
   /* Register extrication interface */
+  // 设置信号量不可用
   THREAD_SETMEM(self, p_sem_avail, 0);
+  // 设置在pthread_cancel中执行的函数
   __pthread_set_own_extricate_if(self, &extr);
   /* Enqueue only if not already cancelled. */
+  // 还没被取消，插入等待信号量的队列
   if (!(THREAD_GETMEM(self, p_canceled)
       && THREAD_GETMEM(self, p_cancelstate) == PTHREAD_CANCEL_ENABLE))
     enqueue(&sem->__sem_waiting, self);
   else
+    // 已经取消
     already_canceled = 1;
   __pthread_unlock(&sem->__sem_lock);
-
+  // 已经取消，清除在pthread_cancel中被执行的函数，然后退出线程
   if (already_canceled) {
     __pthread_set_own_extricate_if(self, 0);
     __pthread_do_exit(PTHREAD_CANCELED, CURRENT_STACK_FRAME);
@@ -92,7 +100,9 @@ int __new_sem_wait(sem_t * sem)
   spurious_wakeup_count = 0;
   while (1)
     {
+      // 挂起
       suspend(self);
+      // 唤醒后判断信号量是否可用
       if (THREAD_GETMEM(self, p_sem_avail) == 0
 	  && (THREAD_GETMEM(self, p_woken_by_cancel) == 0
 	      || THREAD_GETMEM(self, p_cancelstate) != PTHREAD_CANCEL_ENABLE))
@@ -116,7 +126,7 @@ int __new_sem_wait(sem_t * sem)
   /* We got the semaphore */
   return 0;
 }
-
+// 非阻塞式
 int __new_sem_trywait(sem_t * sem)
 {
   int retval;
@@ -132,7 +142,7 @@ int __new_sem_trywait(sem_t * sem)
   __pthread_unlock(&sem->__sem_lock);
   return retval;
 }
-
+// 有可用资源
 int __new_sem_post(sem_t * sem)
 {
   pthread_descr self = thread_self();
@@ -141,16 +151,20 @@ int __new_sem_post(sem_t * sem)
 
   if (THREAD_GETMEM(self, p_in_sighandler) == NULL) {
     __pthread_lock(&sem->__sem_lock, self);
+    // 有线程在等待资源，直接消费掉
     if (sem->__sem_waiting == NULL) {
+      // 非法值
       if (sem->__sem_value >= SEM_VALUE_MAX) {
         /* Overflow */
         errno = ERANGE;
         __pthread_unlock(&sem->__sem_lock);
         return -1;
       }
+      // 资源数加一
       sem->__sem_value++;
       __pthread_unlock(&sem->__sem_lock);
     } else {
+      // 取出一个等待的线程，唤醒他
       th = dequeue(&sem->__sem_waiting);
       __pthread_unlock(&sem->__sem_lock);
       th->p_sem_avail = 1;
@@ -173,15 +187,16 @@ int __new_sem_post(sem_t * sem)
   }
   return 0;
 }
-
+// 获得当前资源数
 int __new_sem_getvalue(sem_t * sem, int * sval)
 {
   *sval = sem->__sem_value;
   return 0;
 }
-
+// 销毁信号量
 int __new_sem_destroy(sem_t * sem)
-{
+{ 
+  // 还有线程在等待
   if (sem->__sem_waiting != NULL) {
     __set_errno (EBUSY);
     return -1;
